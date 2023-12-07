@@ -3,21 +3,28 @@ param($tenant)
 
 $Table = Get-CIPPTable -TableName SchedulerConfig
 $Filter = "RowKey eq 'CippNotifications' and PartitionKey eq 'CippNotifications'"
-$Config = [pscustomobject](Get-AzDataTableEntity @Table -Filter $Filter)
+$Config = [pscustomobject](Get-CIPPAzDataTableEntity @Table -Filter $Filter)
 
 $Settings = [System.Collections.ArrayList]@('Alerts')
 $Config.psobject.properties.name | ForEach-Object { $settings.add($_) } 
-
+$severity = $Config.Severity -split ','
+Write-Host "Our Severity table is: $severity"
+if (!$severity) {
+  $severity = [System.Collections.ArrayList]@('Info', 'Error', 'Warning', 'Critical', 'Alert')
+}
+Write-Host "Our Severity table is: $severity"
 $Table = Get-CIPPTable
 $PartitionKey = Get-Date -UFormat '%Y%m%d'
 $Filter = "PartitionKey eq '{0}'" -f $PartitionKey
-$Currentlog = Get-AzDataTableEntity @Table -Filter $Filter | Where-Object { $_.API -In $Settings -and $_.SentAsAlert -ne $true }
-
+$Currentlog = Get-CIPPAzDataTableEntity @Table -Filter $Filter | Where-Object { 
+  $_.API -In $Settings -and $_.SentAsAlert -ne $true -and $_.Severity -In $severity
+}
+Write-Host ($Currentlog).count
 #email try
 try {
   if ($config.onePerTenant) {
     if ($Config.email -like '*@*' -and $null -ne $CurrentLog) {
-      $JSONRecipients = $Config.email.split(",").trim() | ForEach-Object { if ($_ -like '*@*') { '{"EmailAddress": {"Address": "' + $_ + '"}},' } }
+      $JSONRecipients = $Config.email.split(",").trim() | ForEach-Object { if ($_ -like '*@*') { '{ "EmailAddress": { "Address": "' + $_ + '" } }, ' } }
       $JSONRecipients = ([string]$JSONRecipients).Substring(0, ([string]$JSONRecipients).Length - 1)
       foreach ($tenant in ($CurrentLog.Tenant | Sort-Object -Unique)) {
         $HTMLLog = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity | Where-Object -Property tenant -EQ $tenant | ConvertTo-Html -frag) -replace '<table>', '<table class=blueTable>' | Out-String
@@ -42,12 +49,13 @@ try {
                       }
 "@
         New-GraphPostRequest -uri 'https://graph.microsoft.com/v1.0/me/sendMail' -tenantid $env:TenantID -type POST -body ($JSONBody)
+        Write-LogMessage -API 'Alerts' -message "Sent alerts to: $($JSONRecipients)" -tenant $Tenant -sev Debug
       }
     }
   }
   else {
     if ($Config.email -like '*@*' -and $null -ne $CurrentLog) {
-      $JSONRecipients = $Config.email.split(",").trim() | ForEach-Object { if ($_ -like '*@*') { '{"EmailAddress": {"Address": "' + $_ + '"}},' } }
+      $JSONRecipients = $Config.email.split(",").trim() | ForEach-Object { if ($_ -like '*@*') { '{ "EmailAddress": { "Address": "' + $_ + '" } }, ' } }
       $JSONRecipients = ([string]$JSONRecipients).Substring(0, ([string]$JSONRecipients).Length - 1)
       $HTMLLog = ($CurrentLog | Select-Object Message, API, Tenant, Username, Severity | ConvertTo-Html -frag) -replace '<table>', '<table class=blueTable>' | Out-String
       $JSONBody = @"
@@ -71,13 +79,16 @@ try {
                       }
 "@
       New-GraphPostRequest -uri 'https://graph.microsoft.com/v1.0/me/sendMail' -tenantid $env:TenantID -type POST -body ($JSONBody)
+      Write-LogMessage -API 'Alerts' -message "Sent alerts to: $($Config.email)" -tenant $Tenant -sev Debug
     }
   }
 }
 catch {
   Write-Host "Could not send alerts to email: $($_.Exception.message)"
-  Write-LogMessage -API 'Alerts' -message "Could not send alerts to : $($_.Exception.message)" -sev info
+  Write-LogMessage -API 'Alerts' -message "Could not send alerts to: $($_.Exception.message)" -tenant $Tenant -sev error
 }
+
+
 try {
   Write-Host $($config | ConvertTo-Json)
   Write-Host $config.webhook
@@ -110,7 +121,7 @@ try {
         Invoke-RestMethod -Uri $config.webhook -Method POST -ContentType 'Application/json' -Body $JSONBody
       }
     }
-
+    Write-LogMessage -API 'Alerts' -tenant $Tenant -message "Sent Webhook to $($config.webhook)" -sev Debug
   }
 
   $UpdateLogs = $CurrentLog | ForEach-Object { 
@@ -118,12 +129,12 @@ try {
     $_
   }
   if ($UpdateLogs) {
-    Add-AzDataTableEntity @Table -Entity $UpdateLogs -Force
+    Add-CIPPAzDataTableEntity @Table -Entity $UpdateLogs -Force
   }
 }
 catch {
   Write-Host "Could not send alerts to webhook: $($_.Exception.message)"
-  Write-LogMessage -API 'Alerts' -message "Could not send alerts to : $($_.Exception.message)" -sev info
+  Write-LogMessage -API 'Alerts' -message "Could not send alerts to : $($_.Exception.message)" -tenant $Tenant -sev error
 }
 
 if ($config.sendtoIntegration) {
@@ -141,13 +152,13 @@ if ($config.sendtoIntegration) {
         $_
       }
       if ($UpdateLogs) {
-        Add-AzDataTableEntity @Table -Entity $UpdateLogs -Force
+        Add-CIPPAzDataTableEntity @Table -Entity $UpdateLogs -Force
       }
     }
   }
   catch {
     Write-Host "Could not send alerts to ticketing system: $($_.Exception.message)"
-    Write-LogMessage -API 'Alerts' -message "Could not send alerts to : $($_.Exception.message)" -sev info
+    Write-LogMessage -API 'Alerts' -tenant $Tenant -message "Could not send alerts to ticketing system: $($_.Exception.message)" -sev Error
   }
 }
 
