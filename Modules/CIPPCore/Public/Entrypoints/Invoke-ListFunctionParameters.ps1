@@ -3,9 +3,10 @@ using namespace System.Net
 function Invoke-ListFunctionParameters {
     <#
     .FUNCTIONALITY
-    Entrypoint
+        Entrypoint
+    .ROLE
+        CIPP.Core.Read
     #>
-    # Input bindings are passed in via param block.
     param($Request, $TriggerMetadata)
 
     $APIName = $TriggerMetadata.FunctionName
@@ -25,17 +26,35 @@ function Invoke-ListFunctionParameters {
     if ($Function) {
         $CommandQuery.Name = $Function
     }
-
-    $CommonParameters = @('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'TenantFilter', 'APIName', 'ExecutingUser')
-    #temporary until I clean up the coremodule and move things private.
-    $TemporaryBlacklist = 'Get-CIPPAuthentication', 'Invoke-CippWebhookProcessing', 'Invoke-ListFunctionParameters', 'New-CIPPAPIConfig', 'New-CIPPGraphSubscription.ps1'
+    $IgnoreList = 'entryPoint', 'internal'
+    $CommonParameters = @('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'TenantFilter', 'APIName', 'ExecutingUser', 'ProgressAction', 'WhatIf', 'Confirm')
+    $TemporaryBlacklist = 'Get-CIPPAuthentication', 'Invoke-CippWebhookProcessing', 'Invoke-ListFunctionParameters', 'New-CIPPAPIConfig', 'New-CIPPGraphSubscription'
     try {
-        $Functions = Get-Command @CommandQuery | Where-Object { $_.Visibility -eq 'Public' }
+        if ($Module -eq 'ExchangeOnlineManagement') {
+            $ExoRequest = @{
+                AvailableCmdlets = $true
+                tenantid         = $env:TenantId
+                NoAuthCheck      = $true
+            }
+            if ($Request.Query.Compliance -eq $true) {
+                $ExoRequest.Compliance = $true
+            }
+            $Functions = New-ExoRequest @ExoRequest
+            Write-Host $Functions
+        } else {
+            $Functions = Get-Command @CommandQuery | Where-Object { $_.Visibility -eq 'Public' }
+        }
         $Results = foreach ($Function in $Functions) {
             if ($Function -In $TemporaryBlacklist) { continue }
-            $Help = Get-Help $Function
+            $GetHelp = @{
+                Name = $Function
+            }
+            if ($Module -eq 'ExchangeOnlineManagement') {
+                $GetHelp.Path = 'ExchangeOnlineHelp'
+            }
+            $Help = Get-Help @GetHelp
             $ParamsHelp = ($Help | Select-Object -ExpandProperty parameters).parameter | Select-Object name, @{n = 'description'; exp = { $_.description.Text } }
-            if ($Help.Functionality -eq 'Entrypoint') { continue }
+            if ($Help.Functionality -in $IgnoreList) { continue }
             $Parameters = foreach ($Key in $Function.Parameters.Keys) {
                 if ($CommonParameters -notcontains $Key) {
                     $Param = $Function.Parameters.$Key

@@ -2,7 +2,9 @@
 function Invoke-ListGraphRequest {
     <#
     .FUNCTIONALITY
-    Entrypoint
+        Entrypoint
+    .ROLE
+        CIPP.Core.Read
     #>
     [CmdletBinding()]
     param($Request, $TriggerMetadata)
@@ -12,7 +14,7 @@ function Invoke-ListGraphRequest {
     $Message = 'Accessed this API | Endpoint: {0}' -f $Request.Query.Endpoint
     Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME -message $Message -Sev 'Debug'
 
-    $CippLink = ([System.Uri]$TriggerMetadata.Headers.referer).PathAndQuery
+    $CippLink = ([System.Uri]$TriggerMetadata.Headers.Referer).PathAndQuery
 
     $Parameters = @{}
     if ($Request.Query.'$filter') {
@@ -47,6 +49,10 @@ function Invoke-ListGraphRequest {
         $Parameters.'$search' = $Request.Query.'$search'
     }
 
+    if ($Request.Query.'$format') {
+        $Parameters.'$format' = $Request.Query.'$format'
+    }
+
     $GraphRequestParams = @{
         Endpoint   = $Request.Query.Endpoint
         Parameters = $Parameters
@@ -74,7 +80,7 @@ function Invoke-ListGraphRequest {
     }
 
     if ($Request.Query.QueueNameOverride) {
-        $GraphRequestParams.QueueNameOverride = [System.Boolean]$Request.Query.QueueNameOverride
+        $GraphRequestParams.QueueNameOverride = [string]$Request.Query.QueueNameOverride
     }
 
     if ($Request.Query.ReverseTenantLookup) {
@@ -89,17 +95,31 @@ function Invoke-ListGraphRequest {
         $GraphRequestParams.SkipCache = [System.Boolean]$Request.Query.SkipCache
     }
 
+    if ($Request.Query.ListProperties) {
+        $GraphRequestParams.NoPagination = $true
+        $GraphRequestParams.Parameters.'$select' = ''
+        if ($Request.Query.TenantFilter -eq 'AllTenants') {
+            $GraphRequestParams.TenantFilter = (Get-Tenants | Select-Object -First 1).customerId
+        }
+    }
+
     Write-Host ($GraphRequestParams | ConvertTo-Json)
 
     $Metadata = $GraphRequestParams
 
     try {
         $Results = Get-GraphRequestList @GraphRequestParams
-        if ($Results.Queued -eq $true) {
-            $Metadata.Queued = $Results.Queued
-            $Metadata.QueueMessage = $Results.QueueMessage
-            $Metadata.QueuedId = $Results.QueueId
-            $Results = @()
+
+        if ($Request.Query.ListProperties) {
+            $Columns = ($Results | Select-Object -First 1).PSObject.Properties.Name
+            $Results = $Columns | Where-Object { @('Tenant', 'CippStatus') -notcontains $_ }
+        } else {
+            if ($Results.Queued -eq $true) {
+                $Metadata.Queued = $Results.Queued
+                $Metadata.QueueMessage = $Results.QueueMessage
+                $Metadata.QueuedId = $Results.QueueId
+                $Results = @()
+            }
         }
         $GraphRequestData = [PSCustomObject]@{
             Results  = @($Results)
@@ -108,11 +128,17 @@ function Invoke-ListGraphRequest {
         $StatusCode = [HttpStatusCode]::OK
     } catch {
         $GraphRequestData = "Graph Error: $($_.Exception.Message) - Endpoint: $($Request.Query.Endpoint)"
-        $StatusCode = [HttpStatusCode]::BadRequest
+        if ($Request.Query.IgnoreErrors) { $StatusCode = [HttpStatusCode]::OK }
+        else { $StatusCode = [HttpStatusCode]::BadRequest }
     }
+
+    if ($request.Query.Sort) {
+        $GraphRequestData.Results = $GraphRequestData.Results | Sort-Object -Property $request.Query.Sort
+    }
+    $Outputdata = $GraphRequestData | ConvertTo-Json -Depth 20 -Compress
 
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
             StatusCode = $StatusCode
-            Body       = $GraphRequestData | ConvertTo-Json -Depth 20 -Compress
+            Body       = $Outputdata
         })
 }

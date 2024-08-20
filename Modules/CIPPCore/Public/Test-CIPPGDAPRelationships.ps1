@@ -66,8 +66,9 @@ function Test-CIPPGDAPRelationships {
                 }
             }
             if (-not $GroupFound) {
+                if ($Group -eq 'AdminAgents') { $Type = 'Error' } else { $Type = 'Warning' }
                 $GDAPissues.add([PSCustomObject]@{
-                        Type         = 'Warning'
+                        Type         = $Type
                         Issue        = "$($Group) is not assigned to the SAM user $me. If you have migrated outside of CIPP this is to be expected. Please perform an access check to make sure you have the correct set of permissions."
                         Tenant       = '*Partner Tenant'
                         Relationship = 'None'
@@ -88,7 +89,8 @@ function Test-CIPPGDAPRelationships {
         }
 
     } catch {
-        Write-LogMessage -user $ExecutingUser -API $APINAME -message "Failed to run GDAP check for $($TenantFilter): $($_.Exception.Message)" -Sev 'Error'
+        $ErrorMessage = Get-CippException -Exception $_
+        Write-LogMessage -user $ExecutingUser -API $APINAME -message "Failed to run GDAP check for $($TenantFilter): $($ErrorMessage.NormalizedError)" -Sev 'Error' -LogData $ErrorMessage
     }
 
     return [PSCustomObject]@{

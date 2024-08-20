@@ -2,7 +2,7 @@ function Test-CIPPAccessTenant {
     [CmdletBinding()]
     param (
         $TenantCSV,
-        $APIName = "Access Check",
+        $APIName = 'Access Check',
         $ExecutingUser
     )
     $ExpectedRoles = @(
@@ -22,38 +22,28 @@ function Test-CIPPAccessTenant {
     $Tenants = ($TenantCSV).split(',')
     if (!$Tenants) { $results = 'Could not load the tenants list from cache. Please run permissions check first, or visit the tenants page.' }
     $TenantList = Get-Tenants
-    $TenantIds = foreach ($Tenant in $Tenants) {
-        ($TenantList | Where-Object { $_.defaultDomainName -eq $Tenant }).customerId
-    }
-    try {
-        $MyRoles = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/tenantRelationships/managedTenants/myRoles?`$filter=tenantId in ('$($TenantIds -join "','")')"
-    }
-    catch {
-        $MyRoles = @()
-        $AddedText = 'but could not retrieve GDAP roles from Lighthouse API'
-    }
+
     $results = foreach ($tenant in $Tenants) {
         $AddedText = ''
         try {
             $TenantId = ($TenantList | Where-Object { $_.defaultDomainName -eq $tenant }).customerId
-            $Assignments = ($MyRoles | Where-Object { $_.tenantId -eq $TenantId }).assignments
-            $SAMUserRoles = ($Assignments | Where-Object { $_.assignmentType -eq 'granularDelegatedAdminPrivileges' }).roles
-
             $BulkRequests = $ExpectedRoles | ForEach-Object { @(
                     @{
-                        id     = "roleManagement_$($_.id)"
+                        id     = "roleManagement_$($_.Id)"
                         method = 'GET'
-                        url    = "roleManagement/directory/roleAssignments?`$filter=roleDefinitionId eq '$($_.id)'&`$expand=principal"
+                        url    = "roleManagement/directory/roleAssignments?`$filter=roleDefinitionId eq '$($_.Id)'&`$expand=principal"
                     }
                 )
             }
             $GDAPRolesGraph = New-GraphBulkRequest -tenantid $tenant -Requests $BulkRequests
             $GDAPRoles = [System.Collections.Generic.List[object]]::new()
             $MissingRoles = [System.Collections.Generic.List[object]]::new()
+
+            #Write-Host ($GDAPRolesGraph.body.value | ConvertTo-Json -Depth 10)
             foreach ($RoleId in $ExpectedRoles) {
                 $GraphRole = $GDAPRolesGraph.body.value | Where-Object -Property roleDefinitionId -EQ $RoleId.Id
                 $Role = $GraphRole.principal | Where-Object -Property organizationId -EQ $ENV:tenantid
-                $SAMRole = $SAMUserRoles | Where-Object -Property templateId -EQ $RoleId.Id
+
                 if (!$Role) {
                     $MissingRoles.Add(
                         [PSCustomObject]@{
@@ -62,18 +52,11 @@ function Test-CIPPAccessTenant {
                         }
                     )
                     $AddedText = 'but missing GDAP roles'
-                }
-                else {
-                    $GDAPRoles.Add([PSCustomObject]$RoleId)
-                }
-                if (!$SAMRole) {
-                    $MissingRoles.Add(
-                        [PSCustomObject]@{
-                            Name = $RoleId.Name
-                            Type = 'SAM User'
-                        }
-                    )
-                    $AddedText = 'but missing GDAP roles'
+                } else {
+                    $GDAPRoles.Add([PSCustomObject]@{
+                            Role  = $RoleId.Name
+                            Group = $Role.displayName
+                        })
                 }
             }
             if (!($MissingRoles | Measure-Object).Count -gt 0) {
@@ -84,38 +67,37 @@ function Test-CIPPAccessTenant {
                 Status       = "Successfully connected $($AddedText)"
                 GDAPRoles    = $GDAPRoles
                 MissingRoles = $MissingRoles
-                SAMUserRoles = $SAMUserRoles
             }
-            Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME -tenant $tenant -message 'Tenant access check executed successfully' -Sev 'Info'
+            Write-LogMessage -user $ExecutingUser -API $APINAME -tenant $tenant -message 'Tenant access check executed successfully' -Sev 'Info'
 
-        }
-        catch {
+        } catch {
+            $ErrorMessage = Get-CippException -Exception $_
             @{
                 TenantName = "$($tenant)"
-                Status     = "Failed to connect: $(Get-NormalizedError -message $_.Exception.Message)"
+                Status     = "Failed to connect: $($ErrorMessage.NormalizedError)"
                 GDAP       = ''
             }
-            Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME -tenant $tenant -message "Tenant access check failed: $(Get-NormalizedError -message $_) " -Sev 'Error'
+            Write-LogMessage -user $ExecutingUser -API $APINAME -tenant $tenant -message "Tenant access check failed: $($ErrorMessage.NormalizedError) " -Sev 'Error' -LogData $ErrorMessage
 
         }
 
         try {
-            $GraphRequest = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-OrganizationConfig' -ErrorAction Stop
+            $null = New-ExoRequest -tenantid $Tenant -cmdlet 'Get-OrganizationConfig' -ErrorAction Stop
             @{
                 TenantName = "$($Tenant)"
                 Status     = 'Successfully connected to Exchange'
             }
 
-        }
-        catch {
+        } catch {
+            $ErrorMessage = Get-CippException -Exception $_
             $ReportedError = ($_.ErrorDetails | ConvertFrom-Json -ErrorAction SilentlyContinue)
             $Message = if ($ReportedError.error.details.message) { $ReportedError.error.details.message } else { $ReportedError.error.innererror.internalException.message }
             if ($null -eq $Message) { $Message = $($_.Exception.Message) }
             @{
                 TenantName = "$($Tenant)"
-                Status     = "Failed to connect to Exchange: $(Get-NormalizedError -message $Message)"
+                Status     = "Failed to connect to Exchange: $($ErrorMessage.NormalizedError)"
             }
-            Write-LogMessage -user $request.headers.'x-ms-client-principal' -API $APINAME -tenant $tenant -message "Tenant access check for Exchange failed: $(Get-NormalizedError -message $Message) " -Sev 'Error'
+            Write-LogMessage -user $ExecutingUser -API $APINAME -tenant $tenant -message "Tenant access check for Exchange failed: $($ErrorMessage.NormalizedError) " -Sev 'Error' -LogData $ErrorMessage
         }
     }
     if (!$Tenants) { $results = 'Could not load the tenants list from cache. Please run permissions check first, or visit the tenants page.' }
